@@ -26,6 +26,113 @@ typedef struct oggstream {
 	theoraDecode mTheora;
 } oggstream;
 
+int print_header_info (th_info *info) {
+	fprintf(stdout,"Header info:\n");
+	fprintf(stdout,"Stream version: %d.%d.%d\n",
+			(int)info->version_major,
+			(int)info->version_minor,
+			(int)info->version_subminor);
+	fprintf(stdout,"Frame size %d x %d\n",
+			info->frame_width,
+			info->frame_height);
+	fprintf(stdout,"Pic size %d x %d\n",
+			info->pic_width,
+			info->pic_height);
+	fprintf(stdout,"Pic offset %+d,%+d\n",
+			info->pic_x,
+			info->pic_y);
+	fprintf(stdout,"Aspect ratio: %d/%d\n",
+			info->aspect_numerator,info->aspect_denominator);
+	switch (info->colorspace) {
+		case TH_CS_UNSPECIFIED:
+			fprintf(stdout,"Colorspace: TH_CS_UNSPECIFIED\n");
+			break;
+		case TH_CS_ITU_REC_470M:
+			fprintf(stdout,"Colorspace: TH_CS_ITU_REC_470M\n");
+			break;
+		case TH_CS_ITU_REC_470BG:
+			fprintf(stdout,"Colorspace: TH_CS_ITU_REC_470BG\n");
+			break;
+		default:
+			fprintf(stdout,"Colorspace: UNKNOWN\n");
+			break;
+	}
+	switch (info->pixel_fmt) {
+		case TH_PF_420:
+			fprintf(stdout,"Pixel Format: TH_PF_420\n");
+			break;
+		case TH_PF_RSVD:
+			fprintf(stdout,"Pixel Format: TH_PF_RSVD\n");
+			break;
+		case TH_PF_422:
+			fprintf(stdout,"Pixel Format: TH_PF_422\n");
+			break;
+		case TH_PF_444:
+			fprintf(stdout,"Pixel Format: TH_PF_444\n");
+			break;
+		default:
+			fprintf(stdout,"Pixel Format: UNKNOWN\n");
+			break;
+	}
+	fprintf(stdout,"Frame rate: %d/%d\n",info->fps_numerator,info->fps_denominator);
+	fprintf(stdout,"Target bitrate: %d\n",info->target_bitrate);
+	fprintf(stdout,"Quality: %d\n",info->quality);
+	fprintf(stdout,"Keyframe Granule shift: %d\n",info->keyframe_granule_shift);
+}
+
+/* The following only works for 444 packing */
+int save_ppm_image(th_info *info, th_ycbcr_buffer buffer, int num) {
+	FILE *fp=NULL;
+	char fname[1024];
+	unsigned int i,j;
+	sprintf(fname,"frame%05d.ppm",num);
+	fp=fopen(fname,"w");
+	fprintf(fp,"P6\n%d %d\n255\n",info->pic_width,info->pic_height);
+	/* Convert each element to RGB */
+	unsigned char r,g,b;
+	unsigned char y,cr,cb;
+	for (j=0;j<info->pic_height;j++) {
+		for (i=0;i<info->pic_width;i++) {
+			switch (info->pixel_fmt) {
+				case TH_PF_420:
+					y=buffer[0].data[(j+info->pic_y)*buffer[0].stride+(i+info->pic_x)];
+					cb=buffer[1].data[((j+info->pic_y)/2)*buffer[1].stride+(i+info->pic_x)/2];
+					cr=buffer[2].data[((j+info->pic_y)/2)*buffer[2].stride+(i+info->pic_x)/2];
+					break;
+				case TH_PF_RSVD:
+					break;
+				case TH_PF_422:
+					break;
+				case TH_PF_444:
+					y=buffer[0].data[(j+info->pic_y)*buffer[0].stride+(i+info->pic_x)];
+					cb=buffer[1].data[(j+info->pic_y)*buffer[1].stride+(i+info->pic_x)];
+					cr=buffer[2].data[(j+info->pic_y)*buffer[2].stride+(i+info->pic_x)];
+					break;
+				default:
+					break;
+			}
+			double tmp;
+			/* red */
+			tmp=255.0*(y-16)/219 + 255*0.701*(cr-128)/112;
+			if (tmp<0) tmp=0;
+			if (tmp>255) tmp=255;
+			r=(unsigned char)tmp;
+			/* green */
+			tmp=255.0*(y-16)/219 - 255*0.886*0.114*(cb-128)/(112*0.587) - 255*0.701*0.299*(cr-128)/(112*0.587);
+			if (tmp<0) tmp=0;
+			if (tmp>255) tmp=255;
+			g=(unsigned char)tmp;
+			/* blue */
+			tmp=255.0*(y-16)/219+255.0*0.866*(cb-128)/112;
+			if (tmp<0) tmp=0;
+			if (tmp>255) tmp=255;
+			b=(unsigned char)tmp;
+			fprintf(fp,"%c%c%c",r,g,b);
+		}
+	}
+	fclose(fp);
+	return 0;
+}
 
 int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
 	int ret;
@@ -54,6 +161,10 @@ int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
 int main(int argc, char *argv[]) {
 	FILE *fp=NULL;
 	int ret=0;
+	th_ycbcr_buffer buffer;
+	th_ycbcr_buffer back_buffer;
+	th_ycbcr_buffer key_frame;
+	ogg_int64_t granulepos=-1;
 	/* a hash table to map ids to each Ogg stream */
 	GHashTable *hash=g_hash_table_new(g_direct_hash,NULL);
 
@@ -73,6 +184,12 @@ int main(int argc, char *argv[]) {
 
 	memset(&state,0,sizeof(state));
 	memset(&page,0,sizeof(page));
+	memset(&back_buffer[0],0,sizeof(back_buffer[0]));
+	memset(&back_buffer[1],0,sizeof(back_buffer[1]));
+	memset(&back_buffer[2],0,sizeof(back_buffer[2]));
+	memset(&key_frame[0],0,sizeof(key_frame[0]));
+	memset(&key_frame[1],0,sizeof(key_frame[1]));
+	memset(&key_frame[2],0,sizeof(key_frame[2]));
 
 	/* initialize the state tracker */
 	ret=ogg_sync_init(&state);
@@ -108,60 +225,121 @@ int main(int argc, char *argv[]) {
 		/* see if we have a full packet stored in the stream */
 		ogg_packet packet;
 		memset(&packet,0,sizeof(packet));
-		ret = ogg_stream_packetout(&stream->mState,&packet);
-		if (ret==0) {
-			/* then a packet is not yet ready */
-			continue;
-		} else if (ret==-1) {
-			fprintf(stderr,"There is a break in the data! Page lost?\n");
-			continue;
-		}
-		/* otherwise, we have a valid packet */
-		stream->mPacketCount++;
-		/* See if it is a theora packet */
-		ret=th_decode_headerin(&stream->mTheora.mInfo,
-				&stream->mTheora.mComment,
-				&stream->mTheora.mSetup,
-				&packet);
-		if (ret==TH_ENOTFORMAT) {
-			fprintf(stderr,"Not TH_ENOTFORMAT, but %d\n",ret);
-			continue;
-		}
-		/* otherwise, it is a theora packet */
-		if (ret>0) {
-			/* then specifically, it is a header packet */
-			stream->stream_type= TYPE_THEORA;
-			fprintf(stderr,"Stream %d packet %d was a Theora header\n",
-					serial,stream->mPacketCount);
-			continue;
-		}
-		/* then we have a video packet */
-		if (!stream->headers_read) {
-			stream->mTheora.mCtx = th_decode_alloc(
-					&stream->mTheora.mInfo,
-					stream->mTheora.mSetup);
-			if (stream->mTheora.mCtx==NULL) {
-				fprintf(stderr,"Failed to allocated theora context for stream %d\n",
-						serial);
-				return EXIT_FAILURE;
+		while (ogg_stream_packetout(&stream->mState,&packet)!=0) {
+			int break_early=0;
+			/* otherwise, we have a valid packet */
+			stream->mPacketCount++;
+			/* See if it is a theora packet */
+			if (!stream->headers_read) {
+				ret=th_decode_headerin(&stream->mTheora.mInfo,
+						&stream->mTheora.mComment,
+						&stream->mTheora.mSetup,
+						&packet);
+				switch (ret) {
+					case TH_EFAULT:
+						fprintf(stderr,"TH_EFAULT\n");
+						break_early=1;
+						break;
+					case TH_EBADHEADER:
+						fprintf(stderr,"TH_EBADHEADER\n");
+						break_early=1;
+						break;
+					case TH_EVERSION:
+						fprintf(stderr,"TH_EVERSION\n");
+						break_early=1;
+						break;
+					case TH_ENOTFORMAT:
+						fprintf(stderr,"Not TH_ENOTFORMAT, but %d\n",ret);
+						break_early=1;
+						break;
+				}
+				if (break_early) continue;
+				/* otherwise, it is a theora packet */
+				if (ret>0) {
+					/* then specifically, it is a header packet */
+					stream->stream_type= TYPE_THEORA;
+					fprintf(stderr,"Stream %d packet %d was a Theora header\n",
+							serial,stream->mPacketCount);
+					continue;
+				}
+				/* then we have a video packet */
+				if (stream->mTheora.mCtx==NULL)  {
+					stream->mTheora.mCtx = th_decode_alloc(
+							&stream->mTheora.mInfo,
+							stream->mTheora.mSetup);
+				}
+				if (stream->mTheora.mCtx==NULL) {
+					fprintf(stderr,"Failed to allocated theora context for stream %d\n",
+							serial);
+					return EXIT_FAILURE;
+				}
+			} else {
+				stream->headers_read=1;
 			}
-		} else {
-			stream->headers_read=1;
+			/* decode the data packet */
+			fprintf(stderr,"Stream %d packet %d was Theora data\n",
+					serial,stream->mPacketCount);
+			/* add the packet to the decoder */
+			ret=th_decode_packetin(stream->mTheora.mCtx,&packet,&granulepos);
+			if (ret==0) {
+				ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
+				assert(ret==0);
+				/* ok, buffer should now be YUV data */
+				/* make sure back_buffer is allocated */
+				if (
+						back_buffer[0].width!=buffer[0].width ||
+						back_buffer[1].width!=buffer[1].width ||
+						back_buffer[2].width!=buffer[2].width ||
+						back_buffer[0].height!=buffer[0].height ||
+						back_buffer[1].height!=buffer[1].height ||
+						back_buffer[2].height!=buffer[2].height ||
+						back_buffer[0].data==NULL || 
+						back_buffer[1].data==NULL || 
+						back_buffer[2].data==NULL)
+				{
+					int i;
+					for (i=0;i<3;i++) {
+						key_frame[i].width=back_buffer[i].width=buffer[i].width;
+						key_frame[i].height=back_buffer[i].height=buffer[i].height;
+						key_frame[i].stride=back_buffer[i].stride=buffer[i].stride;
+						if (back_buffer[i].data!=NULL) free(back_buffer[i].data);
+						if (key_frame[i].data!=NULL) free(key_frame[i].data);
+						back_buffer[i].data=
+							(unsigned char *)calloc(buffer[i].stride*buffer[i].height,sizeof(char));
+						key_frame[i].data=
+							(unsigned char *)calloc(buffer[i].stride*buffer[i].height,sizeof(char));
+					}
+				}
+				/* if a key frame, copy all data to key_frame */
+				if (th_packet_iskeyframe(&packet)) {
+					int i;
+					for (i=0;i<3;i++) {
+						memmove(key_frame[i].data,buffer[i].data,
+								buffer[i].stride*buffer[i].height);
+					}
+					/* save as a frame */
+					save_ppm_image(&stream->mTheora.mInfo,key_frame,stream->mPacketCount);
+				} else {
+					/* need to add the delta */
+					int i,j,k;
+					for (k=0;k<3;k++) {
+						for (j=0;j<buffer[k].height;j++) {
+							for (i=0;i<buffer[k].width;i++) {
+								back_buffer[k].data[j*back_buffer[k].stride + i]=
+									//key_frame[k].data[j*key_frame[k].stride+i]
+									buffer[k].data[j*buffer[k].stride + i];
+							}
+						}
+					}
+					/* do something with it...*/
+					save_ppm_image(&stream->mTheora.mInfo,back_buffer,stream->mPacketCount);
+				}
+			}
 		}
-		/* decode the data packet */
-		/* add the packet to the decoder */
-		ogg_int64_t granulepos=-1;
-		ret=th_decode_packetin(stream->mTheora.mCtx,&packet,&granulepos);
-		assert(ret==0);
-		th_ycbcr_buffer buffer;
-		ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
-		assert(ret==0);
-		/* ok, buffer should now be YUV data */
-		/* do something with it...*/
-		fprintf(stderr,"Stream %d packet %d was Theora data\n",
-				serial,stream->mPacketCount);
 	}
 	fclose(fp);
+
+	print_header_info(&stream->mTheora.mInfo);
 
 	GList *vals = g_hash_table_get_values(hash);
 	GList *tlist=NULL;
