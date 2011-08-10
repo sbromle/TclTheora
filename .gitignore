@@ -1,0 +1,15 @@
+=build*
+CMakeFiles
+CMakeCache.txt
+Makefile.in
+autom4te.cache
+aclocal.m4
+configure
+*.swp
+*~
+*#
+.#*
+libltdl
+config.guess
+config.sub
+ltmain.sh
