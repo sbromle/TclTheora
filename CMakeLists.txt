@@ -31,8 +31,8 @@ IF(UNIX AND NOT WIN32)
 ENDIF(UNIX AND NOT WIN32)
 
 add_subdirectory(src)
-add_subdirectory(scripts)
-#add_subdirectory(testing)
+#add_subdirectory(scripts)
+add_subdirectory(testing)
 
 # the following lines are needed to build debian/ubuntu packages.
 set (CPACK_DEBIAN_PACKAGE_NAME ${PACKAGE})

@@ -16,21 +16,18 @@ include_directories(.)
 include_directories(./base)
 
 ########### next target ###############
-set (tcltheora_SRCS
-	tcltheora_Init.c 
+set (theora_test_SRCS
+	theora_test.c 
 )
 
-add_library(tcltheora MODULE ${tcltheora_SRCS})
+add_executable(theora_test ${theora_test_SRCS})
 
 if (USE_TCL_STUBS)
-	target_link_libraries(tcltheora ${TCL_STUB_LIBRARY} ${TCLARGV_LIBRARY} ogg theoradec)
+	target_link_libraries(theora_test ${TCL_STUB_LIBRARY} ${TCLARGV_LIBRARY} ${GLIB2_LIBRARIES} ogg theoradec)
 else (USE_TCL_STUBS)
-	target_link_libraries(tcltheora ${TCL_LIBRARY} ${TCLARGV_LIBRARY} ogg theora)
+	target_link_libraries(theora_test ${TCL_LIBRARY} ${TCLARGV_LIBRARY} ${GLIB2_LIBRARIES} ogg theoradec)
 endif (USE_TCL_STUBS)
-
-set_target_properties (tcltheora PROPERTIES VERSION 0.1 SOVERSION 0 PREFIX "" INSTALL_RPATH_USE_LINK_PATH on)
-
 
 ########### install files ###############
 
-install(TARGETS tcltheora DESTINATION lib/${PACKAGE})
+install(TARGETS theora_test DESTINATION bin)
