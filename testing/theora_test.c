@@ -2,13 +2,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ogg/ogg.h>
+#include <theora/theoradec.h>
 #include <glib.h>
+#include <assert.h>
+
+enum {TYPE_UNKNOWN = 0,
+	TYPE_THEORA=1
+};
+
+typedef struct theoraDecode {
+	th_info mInfo;
+	th_comment mComment;
+	th_setup_info *mSetup;
+	th_dec_ctx *mCtx;
+} theoraDecode;
 
 typedef struct oggstream {
 	int mSerial;
 	ogg_stream_state mState;
+	int stream_type;
+	int headers_read;
 	int mPacketCount;
+	theoraDecode mTheora;
 } oggstream;
+
 
 int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
 	int ret;
@@ -101,6 +118,48 @@ int main(int argc, char *argv[]) {
 		}
 		/* otherwise, we have a valid packet */
 		stream->mPacketCount++;
+		/* See if it is a theora packet */
+		ret=th_decode_headerin(&stream->mTheora.mInfo,
+				&stream->mTheora.mComment,
+				&stream->mTheora.mSetup,
+				&packet);
+		if (ret==TH_ENOTFORMAT) {
+			fprintf(stderr,"Not TH_ENOTFORMAT, but %d\n",ret);
+			continue;
+		}
+		/* otherwise, it is a theora packet */
+		if (ret>0) {
+			/* then specifically, it is a header packet */
+			stream->stream_type= TYPE_THEORA;
+			fprintf(stderr,"Stream %d packet %d was a Theora header\n",
+					serial,stream->mPacketCount);
+			continue;
+		}
+		/* then we have a video packet */
+		if (!stream->headers_read) {
+			stream->mTheora.mCtx = th_decode_alloc(
+					&stream->mTheora.mInfo,
+					stream->mTheora.mSetup);
+			if (stream->mTheora.mCtx==NULL) {
+				fprintf(stderr,"Failed to allocated theora context for stream %d\n",
+						serial);
+				return EXIT_FAILURE;
+			}
+		} else {
+			stream->headers_read=1;
+		}
+		/* decode the data packet */
+		/* add the packet to the decoder */
+		ogg_int64_t granulepos=-1;
+		ret=th_decode_packetin(stream->mTheora.mCtx,&packet,&granulepos);
+		assert(ret==0);
+		th_ycbcr_buffer buffer;
+		ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
+		assert(ret==0);
+		/* ok, buffer should now be YUV data */
+		/* do something with it...*/
+		fprintf(stderr,"Stream %d packet %d was Theora data\n",
+				serial,stream->mPacketCount);
 	}
 	fclose(fp);
 
