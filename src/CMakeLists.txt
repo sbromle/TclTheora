@@ -25,7 +25,7 @@ add_library(tcltheora MODULE ${tcltheora_SRCS})
 if (USE_TCL_STUBS)
 	target_link_libraries(tcltheora ${TCL_STUB_LIBRARY} ${TCLARGV_LIBRARY} ogg theoradec)
 else (USE_TCL_STUBS)
-	target_link_libraries(tcltheora ${TCL_LIBRARY} ${TCLARGV_LIBRARY} ogg theora)
+	target_link_libraries(tcltheora ${TCL_LIBRARY} ${TCLARGV_LIBRARY} ogg theoradec)
 endif (USE_TCL_STUBS)
 
 set_target_properties (tcltheora PROPERTIES VERSION 0.1 SOVERSION 0 PREFIX "" INSTALL_RPATH_USE_LINK_PATH on)

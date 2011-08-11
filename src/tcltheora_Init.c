@@ -143,12 +143,12 @@ int TTO_Exists(Tcl_Interp *interp, Tcl_Obj *CONST name) {
 	TTMasterState *ttms;
 	if (name==NULL) return 0;
 	ttms=Tcl_GetAssocData(interp,TCLTHEORA_HASH_KEY,NULL);
-	return TS_Exists0(interp,ttms,name);
+	return TTO_Exists0(interp,ttms,name);
 }
 
 int TTO_ExistsTcl(Tcl_Interp *interp, TTMasterState *ttms, Tcl_Obj *CONST name)
 {
-	if (TS_Exists0(interp,ttms,name)) {
+	if (TTO_Exists0(interp,ttms,name)) {
 		Tcl_SetObjResult(interp,Tcl_NewIntObj(1));
 		return TCL_OK;
 	}
@@ -380,7 +380,7 @@ error:
 		fclose(fp);
 		if (tto!=NULL) ckfree((char*)tto);
 		if (oggstream!=NULL) {
-			ogg_state_clear(&oggstream->mState);
+			ogg_sync_clear(&state);
 			ckfree((char*)oggstream);
 		}
 		Tcl_AppendResult(interp,msg,NULL);
