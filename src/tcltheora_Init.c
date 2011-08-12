@@ -385,8 +385,8 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	ogg_packet packet;
 	int done=0;
 	while (!done) {
-	  ret=ogg_stream_packetout(&oggstream->mState,&packet);
-		if (ret==0) {
+	  ret=ogg_stream_packetpeek(&oggstream->mState,&packet);
+		while (ret!=1) {
 			ret = get_next_page(tto->state,tto->page,tto->fp);
 			if (ret!=0) break;
 			/* from here on, use stream state  within oggstream */
@@ -396,12 +396,16 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 				msg="Error in ogg_stream_pagein().\n";
 				goto error;
 			}
+	  	ret=ogg_stream_packetpeek(&oggstream->mState,&packet);
 		}
-	  ret=ogg_stream_packetout(&oggstream->mState,&packet);
+		if (ret==-1) {
+			fprintf(stderr,"Error. Ran out of data!\n");
+			break;
+		}
 		fprintf(stderr,"Got a packet\n");
-		int break_early=0;
 		oggstream->mPacketCount++;
 		/* is it a theora packet? */
+		int break_early=0;
 		if (!oggstream->headers_read) {
 			fprintf(stderr,"calling th_decode_headerin\n");
 			ret = th_decode_headerin(
@@ -427,7 +431,11 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 					break_early=1;
 					break;
 			}
-			if (break_early) continue;
+			if (break_early) {
+				/* advance the stream */
+	  		ogg_stream_packetout(&oggstream->mState,&packet);
+				continue;
+			}
 			/* otherwise it *is* a theora packet, therefore
 			 * we have a valid theora stream. We can finish setting everything
 			 * up, register a new command, and return.
@@ -436,8 +444,11 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 			if (ret>0) {
 				fprintf(stderr,"ret=%d\n",ret);
 				/* then we have a header packet. Might as well get another one */
+				/* first advance the packet stream */
+	  		ret=ogg_stream_packetout(&oggstream->mState,&packet);
 				continue;
 			}
+			done=1;
 			oggstream->headers_read=1;
 			fprintf(stderr,"All headers read for stream %d\n",serial);
 			/* otherwise, we've found the first video data packet! */
@@ -450,6 +461,24 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 				Tcl_AppendResult(interp,"Error allocating Theora Context!\n",NULL);
 				return TCL_ERROR;
 			}
+#if 0
+			/* try to decode the data packet */
+			/* FIXME: For now, I need to do this here, otherwise we'll loose
+			 * the first frame, and the theora decode won't have the first
+			 * key-frame for reference. To fix this, I'll need to either
+			 * store the first data packet for later, to be used by the first
+			 * call to NextFrame. Or I'll have to make things smarter in some
+			 * other way. For now, just decode it to make everyone happy. (Well,
+			 * everyone except the user who wants to see the first frame!)
+			 */
+			ogg_int64_t granulepos=-1;
+			ret = th_decode_packetin(oggstream->mTheora.mCtx,&packet,&granulepos);
+			if (ret==0) {
+				/* then all we have to do is decode the frame */
+				th_ycbcr_buffer buffer;
+				ret = th_decode_ycbcr_out(oggstream->mTheora.mCtx,buffer);
+			}
+#endif
 		} 
 	}
 	/* if we get here, we have a valid Theora data stream.
@@ -522,21 +551,39 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 	ogg_packet packet;
 	oggStream *stream=tto->streams[0];
 	assert(stream->headers_read==1); /* should have already been done */
-	/* ensure the photo is the correct size */
 	th_info *info=&stream->mTheora.mInfo;
-	Tk_PhotoSetSize(interp,photo,info->pic_width,info->pic_height);
-	Tk_PhotoGetImage(photo,&dst);
 	/* FIXME: Only supports first stream for now */
-	while (ogg_stream_packetout(&stream->mState,&packet)!=0)
-	{
+	/* Check to see if a packet is avaliable */
+	ret=ogg_stream_packetpeek(&stream->mState,&packet);
+	if (ret==0) {
+		/* then no packet available, so we need to get a new page */
+		if (get_next_page(tto->state,tto->page,tto->fp)!=0) {
+			/* then we are at the end of the stream */
+			/* return the empty list */
+			Tcl_ResetResult(interp);
+			return TCL_OK;
+		}
+		ret = ogg_stream_pagein(&stream->mState,tto->page);
+		if (ret!=0) {
+			fprintf(stderr,"%s: Error in ogg_stream_pagein()\n",__func__);
+		}
+		ret=ogg_stream_packetpeek(&stream->mState,&packet);
+	}
+	if (ret==1) {
 		stream->mPacketCount++;
 	}
+	/* actually advance the packet */
+	ret=ogg_stream_packetout(&stream->mState,&packet);
 
 	/* try to decode the data packet */
 	ret = th_decode_packetin(stream->mTheora.mCtx,&packet,&granulepos);
 	if (ret==0) {
 		/* then all we have to do is decode the frame */
 		ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
+		/* ensure the photo is the correct size */
+		Tk_PhotoSetSize(interp,photo,info->pic_width,info->pic_height);
+		Tk_PhotoGetImage(photo,&dst);
+
 		ycbcr_to_rgb(&stream->mTheora.mInfo,buffer,&dst);
 		Tk_PhotoPutBlock(interp,photo,&dst,0,0,info->pic_width,info->pic_height,TK_PHOTO_COMPOSITE_SET);
 		/* return 1, since we've recovered a frame */

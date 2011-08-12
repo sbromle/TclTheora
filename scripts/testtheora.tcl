@@ -23,6 +23,11 @@ lassign [make_gui .] w photo;
 lassign [theora new [lindex $argv 0]] t;
 puts "Theora object $t created.";
 $t next $photo;
+for {set i 0} {$i<10} {incr i} {
+	$t next $photo;
+	update idletasks
+	after 1000;
+}
 
 
 
