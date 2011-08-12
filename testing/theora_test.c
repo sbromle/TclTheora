@@ -194,6 +194,7 @@ int main(int argc, char *argv[]) {
 	int serial =0;
 	/* read all the pages in the file */
 	while (get_next_page(&state,&page,fp)==0) {
+		fprintf(stderr,"Back from get_next_page()\n");
 		serial = ogg_page_serialno(&page);
 		stream=NULL;
 		if (ogg_page_bos(&page)) {
@@ -277,7 +278,7 @@ int main(int argc, char *argv[]) {
 				ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
 				assert(ret==0);
 				/* ok, buffer should now be YUV data */
-				save_ppm_image(&stream->mTheora.mInfo,buffer,stream->mPacketCount);
+				//save_ppm_image(&stream->mTheora.mInfo,buffer,stream->mPacketCount);
 			}
 		}
 	}
