@@ -20,9 +20,9 @@ proc make_gui {w} {
 }
 
 lassign [make_gui .] w photo;
-set t [theora new [lindex $argv 0]];
+lassign [theora new [lindex $argv 0]] t;
 puts "Theora object $t created.";
-$t hi;
+$t next $photo;
 
 
 

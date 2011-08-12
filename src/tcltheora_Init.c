@@ -68,6 +68,10 @@ typedef struct tcltheora_object_s {
 	oggStream *streams[TCLTHEORA_MAX_NUM_STREAMS];
 } TclTheoraObject;
 
+/* forward definitions */
+int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
+		int objc, Tcl_Obj *CONST objv[]);
+
 static oggStream *find_stream_by_serialno (TclTheoraObject *tto, int serialno) {
 	int i;
 	for (i=0;i<tto->num_streams;i++) {
@@ -220,9 +224,26 @@ static int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
 int handle_tto_cmd (ClientData clientData, Tcl_Interp *interp,
 		int objc, Tcl_Obj *CONST objv[])
 {
-	TclTheoraObject *tto=(TclTheoraObject*)clientData;
-	/* for now, just print out header about its first stream */ 
-	print_header_info(&tto->streams[0]->mTheora.mInfo);
+	CONST char *subCmds[] = {"next",NULL};
+	enum TheoraCmdIx {NextIx,};
+	int index;
+
+	if (objc!=3) {
+		Tcl_WrongNumArgs(interp,1,objv,"next photo");
+		return TCL_ERROR;
+	}
+
+	if (Tcl_GetIndexFromObj(interp,objv[1],subCmds,"sub-command",0,&index)!=TCL_OK)
+		return TCL_ERROR;
+
+	switch (index) {
+		case NextIx:
+			return TclTheora_NextFrame_Cmd(clientData,interp,objc-1,objv+1);
+			break;
+		default:
+			Tcl_AppendResult(interp,"Unknown subcommand.\n",NULL);
+			return TCL_ERROR;
+	}
 	return TCL_OK;
 }
 
@@ -272,7 +293,7 @@ static inline ycbcr_to_rgb(th_info *info, th_ycbcr_buffer buffer,
 			dst->pixelPtr[j*dst->pitch+i*dst->pixelSize+dst->offset[0]]=r;
 			dst->pixelPtr[j*dst->pitch+i*dst->pixelSize+dst->offset[1]]=g;
 			dst->pixelPtr[j*dst->pitch+i*dst->pixelSize+dst->offset[2]]=b;
-			dst->pixelPtr[j*dst->pitch+i*dst->pixelSize+dst->offset[3]]=1;
+			dst->pixelPtr[j*dst->pitch+i*dst->pixelSize+dst->offset[3]]=255;
 		}
 	}
 	return 0;
@@ -362,11 +383,27 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	}
 	/* check to see if we have a full packet stored in the frame */
 	ogg_packet packet;
-	while (ogg_stream_packetout(&oggstream->mState,&packet)!=0) {
+	int done=0;
+	while (!done) {
+	  ret=ogg_stream_packetout(&oggstream->mState,&packet);
+		if (ret==0) {
+			ret = get_next_page(tto->state,tto->page,tto->fp);
+			if (ret!=0) break;
+			/* from here on, use stream state  within oggstream */
+			/* copy the page into the stream */
+			ret = ogg_stream_pagein(&oggstream->mState,tto->page);
+			if (ret!=0) {
+				msg="Error in ogg_stream_pagein().\n";
+				goto error;
+			}
+		}
+	  ret=ogg_stream_packetout(&oggstream->mState,&packet);
+		fprintf(stderr,"Got a packet\n");
 		int break_early=0;
 		oggstream->mPacketCount++;
 		/* is it a theora packet? */
 		if (!oggstream->headers_read) {
+			fprintf(stderr,"calling th_decode_headerin\n");
 			ret = th_decode_headerin(
 					&oggstream->mTheora.mInfo,
 					&oggstream->mTheora.mComment,
@@ -394,11 +431,15 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 			/* otherwise it *is* a theora packet, therefore
 			 * we have a valid theora stream. We can finish setting everything
 			 * up, register a new command, and return.
+			 * But first, read any remaining headers.
 			 */
 			if (ret>0) {
+				fprintf(stderr,"ret=%d\n",ret);
 				/* then we have a header packet. Might as well get another one */
 				continue;
 			}
+			oggstream->headers_read=1;
+			fprintf(stderr,"All headers read for stream %d\n",serial);
 			/* otherwise, we've found the first video data packet! */
 			if (oggstream->mTheora.mCtx==NULL) {
 				oggstream->mTheora.mCtx = th_decode_alloc(
@@ -409,10 +450,7 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 				Tcl_AppendResult(interp,"Error allocating Theora Context!\n",NULL);
 				return TCL_ERROR;
 			}
-		} else {
-			oggstream->headers_read=1;
-			break; /* break out of while loop and handle the rest of the Tcl stuff */
-		}
+		} 
 	}
 	/* if we get here, we have a valid Theora data stream.
 	 * Need to create a unique command for operating on this Theora file */
@@ -473,7 +511,7 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 	/* Get a handle on the photo object */
 	Tk_PhotoHandle photo;
 	Tk_PhotoImageBlock dst;
-	char *str=Tcl_GetString(objv[2]);
+	char *str=Tcl_GetString(objv[1]);
 	photo = Tk_FindPhoto(interp,str);
 	if (photo==NULL) {
 		Tcl_AppendResult(interp,"Cannot find photo \"",str,"\"",NULL);
@@ -488,19 +526,6 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 	th_info *info=&stream->mTheora.mInfo;
 	Tk_PhotoSetSize(interp,photo,info->pic_width,info->pic_height);
 	Tk_PhotoGetImage(photo,&dst);
-	if (dst.pixelPtr==NULL) {
-		fprintf(stderr,"Allocating Tcl pixels.\n");
-		dst.pixelSize=3*sizeof(unsigned char);
-		dst.pitch=info->pic_width*dst.pixelSize;
-		dst.width=info->pic_width;
-		dst.height=info->pic_height;
-		dst.offset[0]=0;
-		dst.offset[1]=1;
-		dst.offset[2]=2;
-		dst.offset[3]=3;
-		dst.pixelPtr=(unsigned char*)malloc(dst.height*dst.pitch);
-	}
-
 	/* FIXME: Only supports first stream for now */
 	while (ogg_stream_packetout(&stream->mState,&packet)!=0)
 	{
