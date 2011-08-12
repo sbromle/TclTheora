@@ -162,8 +162,6 @@ int main(int argc, char *argv[]) {
 	FILE *fp=NULL;
 	int ret=0;
 	th_ycbcr_buffer buffer;
-	th_ycbcr_buffer back_buffer;
-	th_ycbcr_buffer key_frame;
 	ogg_int64_t granulepos=-1;
 	/* a hash table to map ids to each Ogg stream */
 	GHashTable *hash=g_hash_table_new(g_direct_hash,NULL);
@@ -184,12 +182,6 @@ int main(int argc, char *argv[]) {
 
 	memset(&state,0,sizeof(state));
 	memset(&page,0,sizeof(page));
-	memset(&back_buffer[0],0,sizeof(back_buffer[0]));
-	memset(&back_buffer[1],0,sizeof(back_buffer[1]));
-	memset(&back_buffer[2],0,sizeof(back_buffer[2]));
-	memset(&key_frame[0],0,sizeof(key_frame[0]));
-	memset(&key_frame[1],0,sizeof(key_frame[1]));
-	memset(&key_frame[2],0,sizeof(key_frame[2]));
 
 	/* initialize the state tracker */
 	ret=ogg_sync_init(&state);
@@ -285,55 +277,7 @@ int main(int argc, char *argv[]) {
 				ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
 				assert(ret==0);
 				/* ok, buffer should now be YUV data */
-				/* make sure back_buffer is allocated */
-				if (
-						back_buffer[0].width!=buffer[0].width ||
-						back_buffer[1].width!=buffer[1].width ||
-						back_buffer[2].width!=buffer[2].width ||
-						back_buffer[0].height!=buffer[0].height ||
-						back_buffer[1].height!=buffer[1].height ||
-						back_buffer[2].height!=buffer[2].height ||
-						back_buffer[0].data==NULL || 
-						back_buffer[1].data==NULL || 
-						back_buffer[2].data==NULL)
-				{
-					int i;
-					for (i=0;i<3;i++) {
-						key_frame[i].width=back_buffer[i].width=buffer[i].width;
-						key_frame[i].height=back_buffer[i].height=buffer[i].height;
-						key_frame[i].stride=back_buffer[i].stride=buffer[i].stride;
-						if (back_buffer[i].data!=NULL) free(back_buffer[i].data);
-						if (key_frame[i].data!=NULL) free(key_frame[i].data);
-						back_buffer[i].data=
-							(unsigned char *)calloc(buffer[i].stride*buffer[i].height,sizeof(char));
-						key_frame[i].data=
-							(unsigned char *)calloc(buffer[i].stride*buffer[i].height,sizeof(char));
-					}
-				}
-				/* if a key frame, copy all data to key_frame */
-				if (th_packet_iskeyframe(&packet)) {
-					int i;
-					for (i=0;i<3;i++) {
-						memmove(key_frame[i].data,buffer[i].data,
-								buffer[i].stride*buffer[i].height);
-					}
-					/* save as a frame */
-					save_ppm_image(&stream->mTheora.mInfo,key_frame,stream->mPacketCount);
-				} else {
-					/* need to add the delta */
-					int i,j,k;
-					for (k=0;k<3;k++) {
-						for (j=0;j<buffer[k].height;j++) {
-							for (i=0;i<buffer[k].width;i++) {
-								back_buffer[k].data[j*back_buffer[k].stride + i]=
-									//key_frame[k].data[j*key_frame[k].stride+i]
-									buffer[k].data[j*buffer[k].stride + i];
-							}
-						}
-					}
-					/* do something with it...*/
-					save_ppm_image(&stream->mTheora.mInfo,back_buffer,stream->mPacketCount);
-				}
+				save_ppm_image(&stream->mTheora.mInfo,buffer,stream->mPacketCount);
 			}
 		}
 	}
