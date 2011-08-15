@@ -559,8 +559,8 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 		/* then no packet available, so we need to get a new page */
 		if (get_next_page(tto->state,tto->page,tto->fp)!=0) {
 			/* then we are at the end of the stream */
-			/* return the empty list */
-			Tcl_ResetResult(interp);
+			/* return 0 */
+			Tcl_SetObjResult(interp,Tcl_NewIntObj(0));
 			return TCL_OK;
 		}
 		ret = ogg_stream_pagein(&stream->mState,tto->page);
@@ -625,7 +625,7 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 		if (ret!=0) {
 			fprintf(stderr,"Error in ogg_stream_page_in() for stream %d\n",serial);
 			fclose(fp);
-			return EXIT_FAILURE;
+			return TCL_ERROR;
 		}
 		/* check to see if we have a full packet stored in the frame */
 		ogg_packet packet;
