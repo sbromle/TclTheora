@@ -221,24 +221,63 @@ static int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
 	return 0;
 }
 
+int TclTheora_GetInfo_Cmd(ClientData clientData, Tcl_Interp *interp,
+		int objc, Tcl_Obj *CONST objv[])
+{
+	CONST char *subCmds[] = {"frameRate",NULL};
+	enum TheoraCmdIx {FrameRateIx,};
+	int index;
+
+	TclTheoraObject *tto=NULL;
+	Tcl_Obj *result=NULL;
+
+	if (Tcl_GetIndexFromObj(interp,objv[1],subCmds,"sub-command",0,&index)!=TCL_OK)
+		return TCL_ERROR;
+	switch(index) {
+		case FrameRateIx:
+			if (objc!=2) {
+				Tcl_WrongNumArgs(interp,1,objv,"frameRate");
+				return TCL_ERROR;
+			}
+			tto=(TclTheoraObject *)clientData;
+			oggStream *stream=tto->streams[0];
+			result=Tcl_NewListObj(0,NULL);
+			if (Tcl_ListObjAppendElement(interp,result,Tcl_NewIntObj(stream->mTheora.mInfo.fps_numerator))!=TCL_OK) return TCL_ERROR;
+			if (Tcl_ListObjAppendElement(interp,result,Tcl_NewIntObj(stream->mTheora.mInfo.fps_denominator))!=TCL_OK) return TCL_ERROR;
+			Tcl_SetObjResult(interp,result);
+			return TCL_OK;
+			break;
+		default:
+			Tcl_AppendResult(interp,"Unknown subcommand.\n",NULL);
+			return TCL_ERROR;
+	}
+	return TCL_ERROR;
+}
+
 int handle_tto_cmd (ClientData clientData, Tcl_Interp *interp,
 		int objc, Tcl_Obj *CONST objv[])
 {
-	CONST char *subCmds[] = {"next",NULL};
-	enum TheoraCmdIx {NextIx,};
+	CONST char *subCmds[] = {"next","frameRate",NULL};
+	enum TheoraCmdIx {NextIx,FrameRateIx,};
 	int index;
-
-	if (objc!=3) {
-		Tcl_WrongNumArgs(interp,1,objv,"next photo");
-		return TCL_ERROR;
-	}
 
 	if (Tcl_GetIndexFromObj(interp,objv[1],subCmds,"sub-command",0,&index)!=TCL_OK)
 		return TCL_ERROR;
 
 	switch (index) {
 		case NextIx:
+			if (objc!=3) {
+				Tcl_WrongNumArgs(interp,1,objv,"next photo");
+				return TCL_ERROR;
+			}
 			return TclTheora_NextFrame_Cmd(clientData,interp,objc-1,objv+1);
+			break;
+		case FrameRateIx:
+			if (objc!=2) {
+				Tcl_WrongNumArgs(interp,1,objv,"frameRate");
+				return TCL_ERROR;
+			}
+			return TclTheora_GetInfo_Cmd(clientData,interp,objc,objv);
 			break;
 		default:
 			Tcl_AppendResult(interp,"Unknown subcommand.\n",NULL);
