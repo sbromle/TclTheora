@@ -19,15 +19,41 @@ proc make_gui {w} {
 	return [list $w $i];
 }
 
-lassign [make_gui .] w photo;
-lassign [theora new [lindex $argv 0]] t;
-puts "Theora object $t created.";
-$t next $photo;
-for {set i 0} {$i<10} {incr i} {
-	$t next $photo;
-	update idletasks
-	after 1000;
+proc do_loop {t p fn fd {lastms 0}} {
+	# calculate frame delay (warning! susceptible to accumulated drift!);
+	if {[$t next $p]!=0} {
+		set ms [clock milliseconds];
+		set dt [expr {$ms-$lastms}];
+		set delay [expr {int($fd*1000.0/$fn)}];
+		if {$delay-$dt<0} {
+			$t next $p; # immediately draw this frame;
+			puts stderr $dt;
+			after $delay [list do_loop $t $p $fn $fd $ms];
+		} else {
+			after [expr {$delay-$dt}] [list do_loop $t $p $fn $fd $ms];
+		}
+	}
 }
+
+lassign [make_gui .] w photo;
+set t [theora new [lindex $argv 0]];
+puts "Theora object $t created.";
+lassign [$t frameRate] fn fd;
+puts "Theora object $t frameRate = $fn/$fd.";
+#do_loop $t $photo $fn $fd;
+set ms [clock milliseconds];
+set dtsum 0;
+set nframes 0;
+while {[$t next $photo]!=0} {
+	set m1 [clock milliseconds];
+	update idletasks;
+	set dtsum [expr {$dtsum+($m1-$ms)}];
+	incr nframes;
+	set ms $m1;
+}
+puts stderr "Average delay was [expr {$dtsum*1.0/$nframes}]";
+puts stderr "Desired delay was [expr {$fd*1000.0/$fn}]";
+
 
 
 
