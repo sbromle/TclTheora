@@ -32,16 +32,11 @@
 #include <tk.h>
 #include <ogg/ogg.h>
 #include <theora/theoradec.h>
+#include <variable_state.h>
 
 #define TCLTHEORA_HASH_KEY "theora_hash"
 
 enum {TCLTHEORA_MAX_NUM_STREAMS=16};
-
-/* a type to track all TclTheora objects within an Interpreter */
-typedef struct TTMasterState_s {
-	Tcl_HashTable *hash;
-	unsigned int count;
-} TTMasterState;
 
 typedef struct theoraDecode_s {
 	th_info mInfo;
@@ -67,6 +62,12 @@ typedef struct tcltheora_object_s {
 	int num_streams; /* number of allocated streams in this file */
 	oggStream *streams[TCLTHEORA_MAX_NUM_STREAMS];
 } TclTheoraObject;
+
+/* a type to track all TclTheora objects within an Interpreter */
+/* get the pointer to a TclTheoraObject by name */
+int getTTOFromObj(Tcl_Interp *interp, Tcl_Obj *CONST name, TclTheoraObject **tto) {
+	return getVarFromObjKey(TCLTHEORA_HASH_KEY,interp,name,(void**)tto);
+}
 
 /* forward definitions */
 int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
@@ -132,69 +133,6 @@ static int print_header_info (th_info *info) {
 	fprintf(stdout,"Target bitrate: %d\n",info->target_bitrate);
 	fprintf(stdout,"Quality: %d\n",info->quality);
 	fprintf(stdout,"Keyframe Granule shift: %d\n",info->keyframe_granule_shift);
-}
-
-
-int TTO_Exists0(Tcl_Interp *interp,
-		TTMasterState *ttms,
-		Tcl_Obj *CONST name)
-{
-	Tcl_HashEntry *entryPtr=NULL;
-	if (name==NULL) return 0;
-	entryPtr=Tcl_FindHashEntry(ttms->hash,Tcl_GetString(name));
-	if (entryPtr==NULL) return 0;
-	return 1;
-}
-
-int TTO_Exists(Tcl_Interp *interp, Tcl_Obj *CONST name) {
-	TTMasterState *ttms;
-	if (name==NULL) return 0;
-	ttms=Tcl_GetAssocData(interp,TCLTHEORA_HASH_KEY,NULL);
-	return TTO_Exists0(interp,ttms,name);
-}
-
-int TTO_ExistsTcl(Tcl_Interp *interp, TTMasterState *ttms, Tcl_Obj *CONST name)
-{
-	if (TTO_Exists0(interp,ttms,name)) {
-		Tcl_SetObjResult(interp,Tcl_NewIntObj(1));
-		return TCL_OK;
-	}
-	Tcl_SetObjResult(interp,Tcl_NewIntObj(0));
-	return TCL_OK;
-}
-
-/* get the pointer to a TclTheoraObject by name */
-int getTTOByName(Tcl_Interp *interp, char *name, TclTheoraObject **tto) {
-	TTMasterState *ttms=NULL;
-	Tcl_HashEntry *entryPtr=NULL;
-	TclTheoraObject *to=NULL;
-	if (name==NULL) {
-		Tcl_AppendResult(interp,"name was NULL",NULL);
-		return TCL_ERROR;
-	}
-	if (tto==NULL) {
-		Tcl_AppendResult(interp,"tto was NULL",NULL);
-		return TCL_ERROR;
-	}
-	ttms=(TTMasterState*)Tcl_GetAssocData(interp,TCLTHEORA_HASH_KEY,NULL);
-	entryPtr=Tcl_FindHashEntry(ttms->hash,name);
-	if (entryPtr==NULL) {
-		Tcl_AppendResult(interp,"Unknown theora object: ", name,NULL);
-		return TCL_ERROR;
-	}
-	to=(TclTheoraObject*)Tcl_GetHashValue(entryPtr);
-	*tto=to;
-	return TCL_OK;
-}
-
-int getTTOFromObj(Tcl_Interp *interp, Tcl_Obj *CONST name,
-		TclTheoraObject **tto)
-{
-	if (name==NULL) {
-		Tcl_AppendResult(interp,"name was NULL",NULL);
-		return TCL_ERROR;
-	}
-	return getTTOByName(interp,Tcl_GetString(name),tto);
 }
 
 static int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
@@ -346,17 +284,9 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	char *msg="Error.\n";
 	int ret;
 	TclTheoraObject *tto=NULL;
-	TTMasterState *ttms=NULL;
 
 	if (objc!=2) {
 		Tcl_WrongNumArgs(interp,1,objv,"ogv_file");
-		return TCL_ERROR;
-	}
-
-	/* Try to get a handle on the master state */
-	ttms=(TTMasterState *)Tcl_GetAssocData(interp,TCLTHEORA_HASH_KEY,NULL);
-	if (ttms==NULL) {
-		Tcl_AppendResult(interp,"Could not acquire master state.\n",NULL);
 		return TCL_ERROR;
 	}
 
@@ -522,18 +452,10 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	}
 	/* if we get here, we have a valid Theora data stream.
 	 * Need to create a unique command for operating on this Theora file */
-	char cmdname[256];
-	sprintf(cmdname,"_theora%05d",ttms->count);
-	Tcl_HashEntry *entryPtr=NULL;
-	entryPtr=Tcl_FindHashEntry(ttms->hash,cmdname);
-	if (entryPtr==NULL) {
-		int new;
-		entryPtr=Tcl_CreateHashEntry(ttms->hash,cmdname,&new);
-	} else {
-		Tcl_AppendResult(interp,"Inconsistent internal state with theora tcl object hash!\n",NULL);
+	char cmdname[1024];
+	if (varUniqName(interp,(StateManager_t)clientData,cmdname)!=TCL_OK) {
 		return TCL_ERROR;
 	}
-	Tcl_SetHashValue(entryPtr,(ClientData)tto);
 	/* and create the new command */
 	Tcl_CreateObjCommand(interp,cmdname,handle_tto_cmd,(ClientData)tto,NULL);
 
@@ -549,6 +471,7 @@ error:
 			if (state!=NULL) ckfree((char*)state);
 			ckfree((char*)oggstream);
 		}
+		/* FIXME: Check whether I also need to clear and free the stream_state here. */
 		Tcl_AppendResult(interp,msg,NULL);
 		return TCL_ERROR;
 
@@ -563,7 +486,6 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 	char *msg="Error.\n";
 	int ret;
 	TclTheoraObject *tto=NULL;
-	TTMasterState *ttms=NULL;
 	ogg_int64_t granulepos=-1;
 	th_ycbcr_buffer buffer;
 
@@ -695,6 +617,8 @@ int theora_cmd(ClientData clientData, Tcl_Interp *interp,
 	enum TheoraCmdIx {NewIx,};
 	int index;
 
+	Tcl_ResetResult(interp);
+
 	if (objc!=3) {
 		Tcl_WrongNumArgs(interp,1,objv,"new file");
 		return TCL_ERROR;
@@ -713,17 +637,31 @@ int theora_cmd(ClientData clientData, Tcl_Interp *interp,
 	}
 }
 
+void theora_free(void *ptr) {
+	int i;
+	TclTheoraObject *tto=(TclTheoraObject *)ptr;
+	if (tto!=NULL) {
+		if (tto->fp!=NULL) fclose(tto->fp);
+		if (tto->page!=NULL) ckfree((char*)tto->page);
+		if (tto->state!=NULL) {
+			ogg_sync_clear(tto->state);
+			ckfree((char*)tto->state);
+		}
+		for (i=0;i<tto->num_streams;i++) {
+			if (tto->streams[i]!=NULL) {
+				ogg_stream_clear(&tto->streams[i]->mState);
+				ckfree((char*)tto->streams[i]);
+			}
+		}
+		ckfree((char*)tto);
+	}
+}
+
 int Tcltheora_Init(Tcl_Interp *interp) {
 	/* initialize the stub table interface */
 	if (Tcl_InitStubs(interp,"8.1",0)==NULL) {
 		return TCL_ERROR;
 	}
-
-	/* Create a theora Tcl object type */
-	
-	/* Create all of the Tcl commands */
-	Tcl_CreateObjCommand(interp,"theora",theora_cmd,
-			(ClientData)NULL,(Tcl_CmdDeleteProc *)NULL);
 
 	Tcl_VarEval(interp,
 			"puts stdout {tcltheora Copyright (C) 2011 Sam Bromley};",
@@ -733,16 +671,8 @@ int Tcltheora_Init(Tcl_Interp *interp) {
 			"puts stdout {For details, see the GNU Lesser Public License V.3 <http://www.gnu.org/licenses>.};",
 			NULL);
 
-	/* Initialize a hash table for keeping track of theora streams */
-	TTMasterState *ttms=(TTMasterState*)ckalloc(sizeof(TTMasterState));
-	ttms->count=0;
-	ttms->hash=(Tcl_HashTable*)ckalloc(sizeof(Tcl_HashTable));
-	Tcl_InitHashTable(ttms->hash,TCL_STRING_KEYS);
-	/* associate this hash with the interpreter to that we can
-	 * retreive it later */
-	/* Note. A delProc should probably be defined for cleaning up
-	 * after an interpreter is destroyed. Just passing NULL for now. */
-	Tcl_SetAssocData(interp,TCLTHEORA_HASH_KEY,NULL,(ClientData)ttms);
+	/* Initialize the variable state manager */
+	InitializeStateManager(interp,TCLTHEORA_HASH_KEY,"theora",theora_cmd,theora_free);
 	/* Declare that we provide the tcltheora package */
 	Tcl_PkgProvide(interp,"tcltheora","1.0");
 	return TCL_OK;

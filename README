@@ -1,0 +1,6 @@
+This is an attempt to expose some libtheora functionality
+via a Tcl interface.
+
+The code here makes use of the TclStateMgr library to manage
+variable names of opened theora resources. You can get that
+library at git://github.com/sbromle/TclStateMgr.git
