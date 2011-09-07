@@ -5,14 +5,9 @@
 include  (FindTclStub)
 option (USE_TCL_STUBS "Enable use of TCL stubs library")
 
-include (FindPkgConfig)
-ADD_DEFINITIONS("`pkg-config --cflags glib-2.0`")
-pkg_check_modules (GLIB2 REQUIRED glib-2.0)
-
 find_path (STATEMGR_INCLUDES variable_state.h /usr/local/include/statemgr)
 find_library (STATEMGR_LIBRARY statemgr /usr/local/lib/statemgr)
 
-include_directories(${GLIB2_INCLUDE_DIRS})
 include_directories(${TCL_INCLUDE_PATH})
 include_directories(${TK_INCLUDE_PATH})
 include_directories(${STATEMGR_INCLUDES})
