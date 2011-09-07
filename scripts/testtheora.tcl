@@ -3,6 +3,11 @@
 lappend auto_path /usr/local/lib;
 package require tcltheora;
 
+if {[llength $argv]==0} {
+	puts "Usage: $argv0 ogg_theora_file.ogv";
+	exit 0;
+}
+
 proc make_gui {w} {
 	set c [canvas $w.c]
 	set x [scrollbar $w.sx -ori hori -command [list $c xview]]
