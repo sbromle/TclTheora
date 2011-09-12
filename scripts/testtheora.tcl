@@ -56,6 +56,21 @@ while {[$t next $photo]!=0} {
 	incr nframes;
 	set ms $m1;
 }
+puts "Ok, will attempt to rewind and play again"
+after 1000;
+$t rewind;
+set ms [clock milliseconds];
+set dtsum 0;
+set nframes 0;
+while {[$t next $photo]!=0} {
+	set m1 [clock milliseconds];
+	update idletasks;
+	set dtsum [expr {$dtsum+($m1-$ms)}];
+	incr nframes;
+	set ms $m1;
+}
+
+
 puts stderr "Average delay was [expr {$dtsum*1.0/$nframes}]";
 puts stderr "Desired delay was [expr {$fd*1000.0/$fn}]";
 

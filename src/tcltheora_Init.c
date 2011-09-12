@@ -25,8 +25,13 @@
 #  include <config.h>
 #endif
 
+#define _LARGEFILE64_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <assert.h>
 #include <tcl.h>
 #include <tk.h>
@@ -48,20 +53,55 @@ typedef struct theoraDecode_s {
 typedef struct oggStream_s {
 	int mSerial;
 	ogg_stream_state mState;
-	ogg_page mPage;
 	int stream_type;
-	int headers_read;
 	int mPacketCount;
 	theoraDecode_t mTheora;
 } oggStream;
 
 typedef struct tcltheora_object_s {
 	FILE *fp; /* handle to Ogg Theora file */
-	ogg_sync_state *state; /* ogg file state */
+	off64_t start_pos; /* byte offset to start of first stream in file */
+	ogg_sync_state *sync_state; /* ogg file state */
+	int headers_read;
 	ogg_page *page; /* ogg file page */
 	int num_streams; /* number of allocated streams in this file */
 	oggStream *streams[TCLTHEORA_MAX_NUM_STREAMS];
 } TclTheoraObject;
+
+void theora_free_resources(TclTheoraObject *tto) {
+	int i;
+	if (tto==NULL) return;
+	if (tto->page!=NULL) ckfree((char*)tto->page);
+	tto->page=NULL;
+	for (i=0;i<tto->num_streams;i++) {
+		ogg_stream_clear(&tto->streams[i]->mState);
+		th_decode_free(tto->streams[i]->mTheora.mCtx);
+		tto->streams[i]->mTheora.mCtx=NULL;
+		th_info_clear(&tto->streams[i]->mTheora.mInfo);
+		th_comment_clear(&tto->streams[i]->mTheora.mComment);
+		th_setup_free(tto->streams[i]->mTheora.mSetup);
+		ckfree((char*)tto->streams[i]);
+		tto->streams[i]=NULL;
+	}
+	if (tto->sync_state!=NULL) {
+		ogg_sync_clear(tto->sync_state);
+	}
+	tto->headers_read=0;
+	return;
+}
+
+void theora_destroy_func(void *ptr) {
+	int i;
+	TclTheoraObject *tto=(TclTheoraObject *)ptr;
+	if (tto!=NULL) {
+		theora_free_resources(tto);
+		if (tto->fp!=NULL) fclose(tto->fp);
+		tto->fp=NULL;
+		ckfree((char*)tto);
+	}
+	return;
+}
+
 
 /* a type to track all TclTheora objects within an Interpreter */
 /* get the pointer to a TclTheoraObject by name */
@@ -73,12 +113,12 @@ int getTTOFromObj(Tcl_Interp *interp, Tcl_Obj *CONST name, TclTheoraObject **tto
 int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 		int objc, Tcl_Obj *CONST objv[]);
 
-static oggStream *find_stream_by_serialno (TclTheoraObject *tto, int serialno) {
+static int find_stream_by_serial (TclTheoraObject *tto, int serialno) {
 	int i;
 	for (i=0;i<tto->num_streams;i++) {
-		if (tto->streams[i]->mSerial==serialno) return tto->streams[i];
+		if (tto->streams[i]->mSerial==serialno) return i;
 	}
-	return NULL;
+	return -1;
 }
 
 static int print_header_info (th_info *info) {
@@ -135,22 +175,31 @@ static int print_header_info (th_info *info) {
 	fprintf(stdout,"Keyframe Granule shift: %d\n",info->keyframe_granule_shift);
 }
 
-static int get_next_page (ogg_sync_state *state, ogg_page *page, FILE *fp) {
+static int get_next_page (TclTheoraObject *tto) {
 	int ret;
-	while (ogg_sync_pageout(state,page)!=1) {
+	ogg_sync_state *sync_state=tto->sync_state;
+	ogg_page *page=tto->page;
+	FILE *fp=tto->fp;
+	while (ogg_sync_pageout(sync_state,page)!=1) {
 		/* get pointer to ogg internal buffer */
-		char *buff=ogg_sync_buffer(state,4096);
+		char *buff=ogg_sync_buffer(sync_state,4096);
 		if (buff==NULL) {
 			fprintf(stderr,"Got NULL buff from ogg_sync_buffer()\n");
 			return -1;
 		}
 		/* read from the file into the internal buffer */
+		if (tto->num_streams==0) {
+			/* then we are at the very first stream. Store the byte offset of file */
+			/* outside, if we detect the beginning of a stream, then tto->num_streams
+			 * will be incremented, and we will no longer store the start positon */
+			tto->start_pos=lseek64(fileno(tto->fp),0L,SEEK_CUR);
+		}
 		int bytes=fread(buff,sizeof(char),4096,fp);
 		if (bytes==0) {
 			fprintf(stderr,"End of file.\n");
 			return -1;
 		}
-		ret=ogg_sync_wrote(state,bytes);
+		ret=ogg_sync_wrote(sync_state,bytes);
 		if (ret!=0) {
 			fprintf(stderr,"Error from ogg_sync_wrote()\n");
 			return -1;
@@ -192,11 +241,27 @@ int TclTheora_GetInfo_Cmd(ClientData clientData, Tcl_Interp *interp,
 	return TCL_ERROR;
 }
 
+int TclTheora_Rewind_Cmd(ClientData clientData, Tcl_Interp *interp,
+		int objc, Tcl_Obj *CONST objv[])
+{
+	TclTheoraObject *tto=NULL;
+	int i;
+	tto=(TclTheoraObject *)clientData;
+	if (tto->fp==NULL) {
+		Tcl_AppendResult(interp,"Theora Object File not Open.\n",NULL);
+		return TCL_ERROR;
+	}
+	rewind(tto->fp);
+	theora_free_resources(tto);
+	/* re-initialize things */
+	return TCL_OK;
+}
+
 int handle_tto_cmd (ClientData clientData, Tcl_Interp *interp,
 		int objc, Tcl_Obj *CONST objv[])
 {
-	CONST char *subCmds[] = {"next","frameRate",NULL};
-	enum TheoraCmdIx {NextIx,FrameRateIx,};
+	CONST char *subCmds[] = {"next","frameRate","rewind",NULL};
+	enum TheoraCmdIx {NextIx,FrameRateIx,RewindIx};
 	int index;
 
 	if (Tcl_GetIndexFromObj(interp,objv[1],subCmds,"sub-command",0,&index)!=TCL_OK)
@@ -217,6 +282,14 @@ int handle_tto_cmd (ClientData clientData, Tcl_Interp *interp,
 			}
 			return TclTheora_GetInfo_Cmd(clientData,interp,objc,objv);
 			break;
+		case RewindIx:
+			if (objc!=2) {
+				Tcl_WrongNumArgs(interp,1,objv,"rewind");
+				return TCL_ERROR;
+			}
+			return TclTheora_Rewind_Cmd(clientData,interp,objc,objv);
+			break;
+
 		default:
 			Tcl_AppendResult(interp,"Unknown subcommand.\n",NULL);
 			return TCL_ERROR;
@@ -300,52 +373,53 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	/* ok, make a theora object */
 	tto=(TclTheoraObject*)ckalloc(sizeof(TclTheoraObject));
 	tto->fp=fp;
+	tto->headers_read=0;
 
 	/*** is the file a theora stream? ***/
 	/* prepare the theora objects */
-	ogg_sync_state *state=(ogg_sync_state*)ckalloc(sizeof(ogg_sync_state));
-	ogg_page *page=(ogg_page*)ckalloc(sizeof(ogg_page));
-	tto->state=state;
-	tto->page=page;
+	tto->sync_state=(ogg_sync_state*)ckalloc(sizeof(ogg_sync_state));
+	memset(tto->sync_state,0,sizeof(ogg_sync_state));
+	tto->page=(ogg_page*)ckalloc(sizeof(ogg_page));
 	/* initialize the ogg state */
-	ret=ogg_sync_init(state);
+	ret=ogg_sync_init(tto->sync_state);
 	if (ret!=0) {
 		msg="Error initializing ogg stream\n";
 		goto error;
 	}
 
 	/* Get at the first page */
-	if (get_next_page(state,page,fp)!=0) {
+	if (get_next_page(tto)!=0) {
 		msg="Could not get a page from Ogg stream.\n";
 		goto error;
 	}
 
 	oggStream *oggstream=NULL;
 	ogg_stream_state stream_state;
-	int serial=ogg_page_serialno(page);
-	if (ogg_page_bos(page)) {
+	int serial=ogg_page_serialno(tto->page);
+	int cur_stream=find_stream_by_serial(tto,serial);
+	if (ogg_page_bos(tto->page)) {
 		/* we are at the beginning of a stream */
-		ret=ogg_stream_init(&stream_state,serial);
-		/* then add this stream to the array of streams for this file */
-		oggstream=(oggStream*)ckalloc(sizeof(oggStream));
-		oggstream->mSerial=serial;
-		oggstream->mState=stream_state;
-		if (find_stream_by_serialno(tto,serial)==NULL) {
+		if (cur_stream==-1) {
 			if (tto->num_streams==TCLTHEORA_MAX_NUM_STREAMS) {
 				msg="Too many streams in file.\n";
 				goto error;
 			}
-			tto->streams[tto->num_streams]=oggstream;
+			tto->streams[tto->num_streams]=(oggStream*)ckalloc(sizeof(oggStream));
+			cur_stream=tto->num_streams;
+			tto->streams[cur_stream]->mSerial=serial;
+			ogg_stream_init(&tto->streams[cur_stream]->mState,serial);
 			tto->num_streams++;
 		}
-	} else {
-		/* FIXME: Hmmm. Maybe the error label below shouldn't free oggstream */
-		oggstream=find_stream_by_serialno(tto,serial);
+		/* we are at the beginning of a stream */
+		ret=ogg_stream_init(&tto->streams[cur_stream]->mState,serial);
+	} else if (cur_stream==-1) {
+		fprintf(stderr,"Some error occurred!\n");
+		goto error;
 	}
 
 	/* from here on, use stream state  within oggstream */
 	/* copy the page into the stream */
-	ret = ogg_stream_pagein(&oggstream->mState,tto->page);
+	ret = ogg_stream_pagein(&tto->streams[cur_stream]->mState,tto->page);
 	if (ret!=0) {
 		msg="Error in ogg_stream_pagein().\n";
 		goto error;
@@ -354,33 +428,33 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	ogg_packet packet;
 	int done=0;
 	while (!done) {
-	  ret=ogg_stream_packetpeek(&oggstream->mState,&packet);
+	  ret=ogg_stream_packetpeek(&tto->streams[cur_stream]->mState,&packet);
 		while (ret!=1) {
-			ret = get_next_page(tto->state,tto->page,tto->fp);
+			ret = get_next_page(tto);
 			if (ret!=0) break;
 			/* from here on, use stream state  within oggstream */
 			/* copy the page into the stream */
-			ret = ogg_stream_pagein(&oggstream->mState,tto->page);
+			ret = ogg_stream_pagein(&tto->streams[cur_stream]->mState,tto->page);
 			if (ret!=0) {
 				msg="Error in ogg_stream_pagein().\n";
 				goto error;
 			}
-	  	ret=ogg_stream_packetpeek(&oggstream->mState,&packet);
+	  	ret=ogg_stream_packetpeek(&tto->streams[cur_stream]->mState,&packet);
 		}
 		if (ret==-1) {
 			fprintf(stderr,"Error. Ran out of data!\n");
 			break;
 		}
 		fprintf(stderr,"Got a packet\n");
-		oggstream->mPacketCount++;
+		tto->streams[cur_stream]->mPacketCount++;
 		/* is it a theora packet? */
 		int break_early=0;
-		if (!oggstream->headers_read) {
+		if (!tto->headers_read) {
 			fprintf(stderr,"calling th_decode_headerin\n");
 			ret = th_decode_headerin(
-					&oggstream->mTheora.mInfo,
-					&oggstream->mTheora.mComment,
-					&oggstream->mTheora.mSetup,
+					&tto->streams[cur_stream]->mTheora.mInfo,
+					&tto->streams[cur_stream]->mTheora.mComment,
+					&tto->streams[cur_stream]->mTheora.mSetup,
 					&packet);
 			switch (ret) {
 				case TH_EFAULT:
@@ -402,7 +476,7 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 			}
 			if (break_early) {
 				/* advance the stream */
-	  		ogg_stream_packetout(&oggstream->mState,&packet);
+	  		ogg_stream_packetout(&tto->streams[cur_stream]->mState,&packet);
 				continue;
 			}
 			/* otherwise it *is* a theora packet, therefore
@@ -414,19 +488,19 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 				fprintf(stderr,"ret=%d\n",ret);
 				/* then we have a header packet. Might as well get another one */
 				/* first advance the packet stream */
-	  		ret=ogg_stream_packetout(&oggstream->mState,&packet);
+	  		ret=ogg_stream_packetout(&tto->streams[cur_stream]->mState,&packet);
 				continue;
 			}
 			done=1;
-			oggstream->headers_read=1;
+			tto->headers_read=1;
 			fprintf(stderr,"All headers read for stream %d\n",serial);
 			/* otherwise, we've found the first video data packet! */
-			if (oggstream->mTheora.mCtx==NULL) {
-				oggstream->mTheora.mCtx = th_decode_alloc(
-						&oggstream->mTheora.mInfo,
-						oggstream->mTheora.mSetup);
+			if (tto->streams[cur_stream]->mTheora.mCtx==NULL) {
+				tto->streams[cur_stream]->mTheora.mCtx = th_decode_alloc(
+						&tto->streams[cur_stream]->mTheora.mInfo,
+						tto->streams[cur_stream]->mTheora.mSetup);
 			}
-			if (oggstream->mTheora.mCtx==NULL) {
+			if (tto->streams[cur_stream]->mTheora.mCtx==NULL) {
 				Tcl_AppendResult(interp,"Error allocating Theora Context!\n",NULL);
 				return TCL_ERROR;
 			}
@@ -463,17 +537,9 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 	return TCL_OK;
 	
 error:
-		fclose(fp);
-		if (tto!=NULL) ckfree((char*)tto);
-		if (page!=NULL) ckfree((char*)page);
-		if (oggstream!=NULL) {
-			ogg_sync_clear(state);
-			if (state!=NULL) ckfree((char*)state);
-			ckfree((char*)oggstream);
-		}
-		/* FIXME: Check whether I also need to clear and free the stream_state here. */
-		Tcl_AppendResult(interp,msg,NULL);
-		return TCL_ERROR;
+	theora_destroy_func((void*)tto);
+	Tcl_AppendResult(interp,msg,NULL);
+	return TCL_ERROR;
 
 }
 
@@ -511,14 +577,13 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 	/* finish reading any packets already in the stream */
 	ogg_packet packet;
 	oggStream *stream=tto->streams[0];
-	assert(stream->headers_read==1); /* should have already been done */
 	th_info *info=&stream->mTheora.mInfo;
 	/* FIXME: Only supports first stream for now */
 	/* Check to see if a packet is avaliable */
 	ret=ogg_stream_packetpeek(&stream->mState,&packet);
 	if (ret==0) {
 		/* then no packet available, so we need to get a new page */
-		if (get_next_page(tto->state,tto->page,tto->fp)!=0) {
+		if (get_next_page(tto)!=0) {
 			/* then we are at the end of the stream */
 			/* return 0 */
 			Tcl_SetObjResult(interp,Tcl_NewIntObj(0));
@@ -554,35 +619,40 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 
 	/* otherwise, we need to get another page and try again */
 	int got_another_frame=0;
-	while (get_next_page(tto->state,tto->page,tto->fp)==0) {
+	int cur_stream=-1;
+	while (get_next_page(tto)==0) {
 		/* Then we've acquired another page */
 		ogg_stream_state stream_state;
 		oggStream *newstream;
 		int serial=ogg_page_serialno(tto->page);
+		cur_stream=find_stream_by_serial(tto,serial);
 		if (ogg_page_bos(tto->page)) {
 			/* we are at the beginning of a stream */
-			ret=ogg_stream_init(&stream_state,serial);
-			/* must add this stream to the array of streams for this file */
-			newstream=(oggStream*)ckalloc(sizeof(oggStream));
-			newstream->mSerial=serial;
-			newstream->mState=stream_state;
-			if (find_stream_by_serialno(tto,serial)==NULL) {
+			if (cur_stream==-1) {
 				if (tto->num_streams==TCLTHEORA_MAX_NUM_STREAMS) {
-					fprintf(stderr,"Too many streams in file.\n");
+					msg="Too many streams in file.\n";
+					return TCL_ERROR;
 				}
-				tto->streams[tto->num_streams]=newstream;
+				tto->streams[tto->num_streams]=(oggStream*)ckalloc(sizeof(oggStream));
+				cur_stream=tto->num_streams;
+				tto->streams[cur_stream]->mSerial=serial;
+				ogg_stream_init(&tto->streams[cur_stream]->mState,serial);
 				tto->num_streams++;
 			}
+			/* we are at the beginning of a stream */
+			ret=ogg_stream_init(&tto->streams[cur_stream]->mState,serial);
 			/* we only handle the first data stream for now, so just
 			 * try to get another page for that stream.*/
 			continue;
-		} else {
+		} else if (cur_stream==-1) {
+			fprintf(stderr,"Some error occured!\n");
+			return TCL_ERROR;
 			/* FIXME: Hmmm. Maybe the error label below shouldn't free oggstream */
 			//stream=find_stream_by_serialno(tto,serial);
 			/* we'll just use the "stream" value already set way above */
 		}
 		/* copy the page into the stream */
-		ret = ogg_stream_pagein(&stream->mState,tto->page);
+		ret = ogg_stream_pagein(&tto->streams[cur_stream]->mState,tto->page);
 		if (ret!=0) {
 			fprintf(stderr,"Error in ogg_stream_page_in() for stream %d\n",serial);
 			fclose(fp);
@@ -590,15 +660,15 @@ int TclTheora_NextFrame_Cmd(ClientData clientData, Tcl_Interp *interp,
 		}
 		/* check to see if we have a full packet stored in the frame */
 		ogg_packet packet;
-		while (ogg_stream_packetout(&stream->mState,&packet)!=0) {
-			stream->mPacketCount++;
+		while (ogg_stream_packetout(&tto->streams[cur_stream]->mState,&packet)!=0) {
+			tto->streams[cur_stream]->mPacketCount++;
 		}
 		/* try to decode the data packet */
-		ret = th_decode_packetin(stream->mTheora.mCtx,&packet,&granulepos);
+		ret = th_decode_packetin(tto->streams[cur_stream]->mTheora.mCtx,&packet,&granulepos);
 		if (ret==0) {
 			/* then all we have to do is decode the frame */
-			ret = th_decode_ycbcr_out(stream->mTheora.mCtx,buffer);
-			ycbcr_to_rgb(&stream->mTheora.mInfo,buffer,&dst);
+			ret = th_decode_ycbcr_out(tto->streams[cur_stream]->mTheora.mCtx,buffer);
+			ycbcr_to_rgb(&tto->streams[cur_stream]->mTheora.mInfo,buffer,&dst);
 			Tk_PhotoPutBlock(interp,photo,&dst,0,0,info->pic_width,info->pic_height,TK_PHOTO_COMPOSITE_SET);
 			/* return 1, since we've recovered a frame */
 			Tcl_SetObjResult(interp,Tcl_NewIntObj(1));
@@ -637,26 +707,6 @@ int theora_cmd(ClientData clientData, Tcl_Interp *interp,
 	}
 }
 
-void theora_free(void *ptr) {
-	int i;
-	TclTheoraObject *tto=(TclTheoraObject *)ptr;
-	if (tto!=NULL) {
-		if (tto->fp!=NULL) fclose(tto->fp);
-		if (tto->page!=NULL) ckfree((char*)tto->page);
-		if (tto->state!=NULL) {
-			ogg_sync_clear(tto->state);
-			ckfree((char*)tto->state);
-		}
-		for (i=0;i<tto->num_streams;i++) {
-			if (tto->streams[i]!=NULL) {
-				ogg_stream_clear(&tto->streams[i]->mState);
-				ckfree((char*)tto->streams[i]);
-			}
-		}
-		ckfree((char*)tto);
-	}
-}
-
 int Tcltheora_Init(Tcl_Interp *interp) {
 	/* initialize the stub table interface */
 	if (Tcl_InitStubs(interp,"8.1",0)==NULL) {
@@ -672,7 +722,7 @@ int Tcltheora_Init(Tcl_Interp *interp) {
 			NULL);
 
 	/* Initialize the variable state manager */
-	InitializeStateManager(interp,TCLTHEORA_HASH_KEY,"theora",theora_cmd,theora_free);
+	InitializeStateManager(interp,TCLTHEORA_HASH_KEY,"theora",theora_cmd,theora_destroy_func);
 	/* Declare that we provide the tcltheora package */
 	Tcl_PkgProvide(interp,"tcltheora","1.0");
 	return TCL_OK;
