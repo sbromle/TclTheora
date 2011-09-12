@@ -60,7 +60,6 @@ typedef struct oggStream_s {
 
 typedef struct tcltheora_object_s {
 	FILE *fp; /* handle to Ogg Theora file */
-	off64_t start_pos; /* byte offset to start of first stream in file */
 	ogg_sync_state *sync_state; /* ogg file state */
 	int headers_read;
 	ogg_page *page; /* ogg file page */
@@ -78,15 +77,18 @@ void theora_free_resources(TclTheoraObject *tto) {
 		th_decode_free(tto->streams[i]->mTheora.mCtx);
 		tto->streams[i]->mTheora.mCtx=NULL;
 		th_info_clear(&tto->streams[i]->mTheora.mInfo);
-		th_comment_clear(&tto->streams[i]->mTheora.mComment);
+		//th_comment_clear(&tto->streams[i]->mTheora.mComment);
 		th_setup_free(tto->streams[i]->mTheora.mSetup);
 		ckfree((char*)tto->streams[i]);
 		tto->streams[i]=NULL;
 	}
+	tto->num_streams=0;
 	if (tto->sync_state!=NULL) {
 		ogg_sync_clear(tto->sync_state);
 	}
-	tto->headers_read=0;
+	FILE *fp=tto->fp;
+	memset(tto,0,sizeof(TclTheoraObject));
+	tto->fp=fp;
 	return;
 }
 
@@ -187,13 +189,6 @@ static int get_next_page (TclTheoraObject *tto) {
 			fprintf(stderr,"Got NULL buff from ogg_sync_buffer()\n");
 			return -1;
 		}
-		/* read from the file into the internal buffer */
-		if (tto->num_streams==0) {
-			/* then we are at the very first stream. Store the byte offset of file */
-			/* outside, if we detect the beginning of a stream, then tto->num_streams
-			 * will be incremented, and we will no longer store the start positon */
-			tto->start_pos=lseek64(fileno(tto->fp),0L,SEEK_CUR);
-		}
 		int bytes=fread(buff,sizeof(char),4096,fp);
 		if (bytes==0) {
 			fprintf(stderr,"End of file.\n");
@@ -254,6 +249,9 @@ int TclTheora_Rewind_Cmd(ClientData clientData, Tcl_Interp *interp,
 	rewind(tto->fp);
 	theora_free_resources(tto);
 	/* re-initialize things */
+	if (initialize_theora_stream(interp,tto)!=TCL_OK) {
+		return TCL_ERROR;
+	}
 	return TCL_OK;
 }
 
@@ -349,31 +347,9 @@ static inline ycbcr_to_rgb(th_info *info, th_ycbcr_buffer buffer,
 	return 0;
 }
 
-/* command to create a new TclTheora object */
-int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
-		int objc, Tcl_Obj *CONST objv[])
-{
-	FILE *fp=NULL;
-	char *msg="Error.\n";
+int initialize_theora_stream (Tcl_Interp *interp, TclTheoraObject *tto) {
 	int ret;
-	TclTheoraObject *tto=NULL;
-
-	if (objc!=2) {
-		Tcl_WrongNumArgs(interp,1,objv,"ogv_file");
-		return TCL_ERROR;
-	}
-
-	/* Next, try to open the file */
-	fp=fopen(Tcl_GetString(objv[1]),"r");
-	if (fp==NULL) {
-		Tcl_AppendResult(interp,"Error opening file ",Tcl_GetString(objv[1])," .\n",
-				NULL);
-		return TCL_ERROR;
-	}
-	/* ok, make a theora object */
-	tto=(TclTheoraObject*)ckalloc(sizeof(TclTheoraObject));
-	tto->fp=fp;
-	tto->headers_read=0;
+	char *msg=NULL;
 
 	/*** is the file a theora stream? ***/
 	/* prepare the theora objects */
@@ -404,8 +380,11 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 				msg="Too many streams in file.\n";
 				goto error;
 			}
-			tto->streams[tto->num_streams]=(oggStream*)ckalloc(sizeof(oggStream));
 			cur_stream=tto->num_streams;
+			fprintf(stderr,"cur_stream=%d\n",cur_stream);
+			tto->streams[cur_stream]=(oggStream*)ckalloc(sizeof(oggStream));
+			memset(tto->streams[cur_stream],0,sizeof(oggStream));
+			fprintf(stderr,"tto->streams[%d]=%p\n",cur_stream,tto->streams[cur_stream]);
 			tto->streams[cur_stream]->mSerial=serial;
 			ogg_stream_init(&tto->streams[cur_stream]->mState,serial);
 			tto->num_streams++;
@@ -502,7 +481,7 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 			}
 			if (tto->streams[cur_stream]->mTheora.mCtx==NULL) {
 				Tcl_AppendResult(interp,"Error allocating Theora Context!\n",NULL);
-				return TCL_ERROR;
+				goto error;
 			}
 #if 0
 			/* try to decode the data packet */
@@ -524,6 +503,45 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 #endif
 		} 
 	}
+	return TCL_OK;
+
+error:
+	theora_destroy_func((void*)tto);
+	Tcl_AppendResult(interp,msg,NULL);
+	return TCL_ERROR;
+}
+
+/* command to create a new TclTheora object */
+int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
+		int objc, Tcl_Obj *CONST objv[])
+{
+	FILE *fp=NULL;
+	char *msg="Error.\n";
+	int ret;
+	TclTheoraObject *tto=NULL;
+
+	if (objc!=2) {
+		Tcl_WrongNumArgs(interp,1,objv,"ogv_file");
+		return TCL_ERROR;
+	}
+
+	/* Next, try to open the file */
+	fp=fopen(Tcl_GetString(objv[1]),"r");
+	if (fp==NULL) {
+		Tcl_AppendResult(interp,"Error opening file ",Tcl_GetString(objv[1])," .\n",
+				NULL);
+		return TCL_ERROR;
+	}
+	/* ok, make a theora object */
+	tto=(TclTheoraObject*)ckalloc(sizeof(TclTheoraObject));
+	tto->fp=fp;
+	tto->headers_read=0;
+
+	/*** is the file a theora stream? ***/
+	/* prepare the theora objects */
+	if (initialize_theora_stream(interp,tto)!=TCL_OK) {
+		return TCL_ERROR;
+	}
 	/* if we get here, we have a valid Theora data stream.
 	 * Need to create a unique command for operating on this Theora file */
 	char cmdname[1024];
@@ -535,12 +553,6 @@ int TclTheora_New_Cmd(ClientData clientData, Tcl_Interp *interp,
 
 	Tcl_AppendResult(interp,cmdname,NULL);
 	return TCL_OK;
-	
-error:
-	theora_destroy_func((void*)tto);
-	Tcl_AppendResult(interp,msg,NULL);
-	return TCL_ERROR;
-
 }
 
 /* command to grab the next frame from TclTheora object and put it
